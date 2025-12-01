@@ -2,45 +2,43 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FSL Client-Side AI</title>
-    <!-- 1. Import TensorFlow.js -->
+    <title>FSL Client-Side AI (Mobile Optimized)</title>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
-    <!-- 2. Import MediaPipe -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
     <style>
         body { background: #222; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
         
-        #container { position: relative; width: 640px; height: 480px; border: 4px solid #444; border-radius: 12px; overflow: hidden; background: #000; }
+        /* Responsive Container */
+        #container { position: relative; width: 100%; max-width: 480px; aspect-ratio: 4/3; border: 4px solid #444; border-radius: 12px; overflow: hidden; background: #000; }
         
-        /* Video is hidden, we draw on canvas */
         #videoElement { display: none; }
         #canvasElement { width: 100%; height: 100%; transform: scaleX(-1); }
 
-        #overlay { position: absolute; top: 10px; left: 10px; background: rgba(0, 0, 0, 0.6); padding: 10px; border-radius: 5px; text-align: left; }
+        #overlay { position: absolute; top: 10px; left: 10px; background: rgba(0, 0, 0, 0.6); padding: 10px; border-radius: 5px; text-align: left; pointer-events: none; }
         
-        #status-display { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 48px; font-weight: bold; text-shadow: 2px 2px 4px #000; z-index: 20; }
+        #status-display { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 32px; font-weight: bold; text-shadow: 2px 2px 4px #000; z-index: 20; pointer-events: none; text-align: center;}
         
-        #progress-container { position: absolute; bottom: 0; left: 0; width: 100%; height: 20px; background: rgba(50, 50, 50, 0.8); }
+        #progress-container { position: absolute; bottom: 0; left: 0; width: 100%; height: 15px; background: rgba(50, 50, 50, 0.8); }
         #progress-bar { height: 100%; width: 0%; background: #00ff00; transition: width 0.1s linear; }
 
-        #prediction-box { margin-top: 20px; font-size: 24px; padding: 20px; background: #333; border-radius: 8px; width: 600px; text-align: center; }
+        #prediction-box { margin-top: 15px; font-size: 18px; padding: 15px; background: #333; border-radius: 8px; width: 90%; max-width: 480px; text-align: center; }
         .highlight { color: #0f0; font-weight: bold; }
     </style>
 </head>
 <body>
 
-    <h1>FSL Client-Side AI</h1>
+    <h3>FSL AI (Mobile Fast)</h3>
 
     <div id="container">
-        <video id="videoElement"></video>
+        <video id="videoElement" playsinline></video>
         <canvas id="canvasElement"></canvas>
         
         <div id="overlay">
-            <div>Confidence: <span id="conf">0.00</span></div>
-            <div>Current Sign: <span id="curr" class="highlight">-</span></div>
+            <div>Conf: <span id="conf">0.00</span></div>
+            <div>Sign: <span id="curr" class="highlight">-</span></div>
         </div>
 
         <div id="status-display">LOADING...</div>
@@ -91,7 +89,7 @@
                 labels = await response.json();
                 console.log("Labels Loaded!", labels);
                 
-                statusDisplay.innerText = "GET READY";
+                statusDisplay.innerText = "STARTING CAM...";
                 startCamera();
             } catch (err) {
                 console.error("Error loading assets:", err);
@@ -99,24 +97,33 @@
             }
         }
 
-        // --- 2. Landmark Extraction Logic (Matches Python) ---
+        // --- 2. Landmark Extraction (Adapted for MediaPipe Hands) ---
+        // This maps the dynamic "multiHandLandmarks" list back to your fixed [Left, Right] format
         function extractKeypoints(results) {
-            // Function to Flatten and zero-pad if missing
-            const getHand = (landmarks) => {
-                if (landmarks) {
-                    let flat = [];
-                    for (const lm of landmarks) {
-                        flat.push(lm.x, lm.y, lm.z);
-                    }
-                    return flat;
-                } else {
-                    return new Array(21 * 3).fill(0);
-                }
-            };
+            // Initialize empty arrays (zeros)
+            let lh = new Array(21 * 3).fill(0);
+            let rh = new Array(21 * 3).fill(0);
 
-            const lh = getHand(results.leftHandLandmarks);
-            const rh = getHand(results.rightHandLandmarks);
-            return [...lh, ...rh]; // Concatenate arrays
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const label = results.multiHandedness[i].label; // "Left" or "Right"
+                    const landmarks = results.multiHandLandmarks[i];
+                    
+                    // Flatten x, y, z
+                    const flatPoints = [];
+                    for (const lm of landmarks) {
+                        flatPoints.push(lm.x, lm.y, lm.z);
+                    }
+
+                    // Map to correct array (Note: MediaPipe labels are sometimes mirrored)
+                    if (label === 'Left') {
+                        lh = flatPoints;
+                    } else {
+                        rh = flatPoints;
+                    }
+                }
+            }
+            return [...lh, ...rh]; // Concatenated 126 features
         }
 
         // --- 3. MediaPipe Setup ---
@@ -128,11 +135,13 @@
             canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
             canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
             
-            // Draw Connectors
-            drawConnectors(canvasCtx, results.leftHandLandmarks, HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 5});
-            drawLandmarks(canvasCtx, results.leftHandLandmarks, {color: '#00FF00', lineWidth: 2});
-            drawConnectors(canvasCtx, results.rightHandLandmarks, HAND_CONNECTIONS, {color: '#00CC00', lineWidth: 5});
-            drawLandmarks(canvasCtx, results.rightHandLandmarks, {color: '#FF0000', lineWidth: 2});
+            // Draw Hand Connectors
+            if (results.multiHandLandmarks) {
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 3});
+                    drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 3});
+                }
+            }
             canvasCtx.restore();
 
             // --- MAIN LOGIC LOOP ---
@@ -150,7 +159,7 @@
                 if (elapsed >= 2000) {
                     currentState = STATE_RECORD;
                     phaseStartTime = Date.now();
-                    sequence = []; // Clear buffer
+                    sequence = [];
                 }
 
             } else if (currentState === STATE_RECORD) {
@@ -167,7 +176,7 @@
                 if (elapsed >= 2000) {
                     currentState = STATE_RESULT;
                     phaseStartTime = Date.now();
-                    runPrediction(); // Trigger prediction at end of recording
+                    runPrediction(); 
                 }
 
             } else if (currentState === STATE_RESULT) {
@@ -175,7 +184,6 @@
                 progressBar.style.width = (100 - progress) + "%";
                 progressBar.style.backgroundColor = "#00ff00";
                 
-                // Display is handled by runPrediction, text stays visible
                 statusDisplay.style.color = "#00ff00";
 
                 if (elapsed >= 2000) {
@@ -185,35 +193,28 @@
             }
         }
 
-        // --- 4. Prediction Logic ---
+        // --- 4. Prediction Logic (Unchanged) ---
         async function runPrediction() {
-            if (sequence.length < 5) return; // Not enough data
+            if (sequence.length < 5) return; 
 
             // Pad sequence to exactly 60 frames
-            // Note: TFJS needs a tensor of shape [1, 60, 126]
-            
-            // 1. Fill or Trim to 60
             let finalSeq = [];
             if (sequence.length >= SEQUENCE_LENGTH) {
                 finalSeq = sequence.slice(sequence.length - SEQUENCE_LENGTH);
             } else {
-                // Pad with zeros at the start
                 const paddingCount = SEQUENCE_LENGTH - sequence.length;
-                const zeroFrame = new Array(126).fill(0);
+                const zeroFrame = new Array(126).fill(0); // 21*3*2
                 for(let i=0; i<paddingCount; i++) finalSeq.push(zeroFrame);
                 finalSeq = finalSeq.concat(sequence);
             }
 
-            // 2. Convert to Tensor
             const inputTensor = tf.tensor3d([finalSeq]);
 
-            // 3. Predict
             const prediction = model.predict(inputTensor);
             const values = await prediction.data();
             const maxVal = Math.max(...values);
             const maxIndex = values.indexOf(maxVal);
 
-            // 4. Update UI
             const predictedSign = labels[maxIndex];
             confSpan.innerText = maxVal.toFixed(2);
 
@@ -221,7 +222,6 @@
                 currSpan.innerText = predictedSign;
                 statusDisplay.innerText = predictedSign;
                 
-                // Sentence Logic
                 if (sentence.length === 0 || predictedSign !== sentence[sentence.length - 1]) {
                     sentence.push(predictedSign);
                     if (sentence.length > 5) sentence.shift();
@@ -232,37 +232,37 @@
                 statusDisplay.innerText = "LOW CONFIDENCE";
             }
             
-            // Clean up tensor memory
             inputTensor.dispose();
             prediction.dispose();
         }
 
-        // --- 5. Start ---
-        const holistic = new Holistic({locateFile: (file) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
+        // --- 5. Optimized Start ---
+        // Using "Hands" instead of "Holistic"
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
         }});
         
-        holistic.setOptions({
-            modelComplexity: 1,
-            smoothLandmarks: true,
+        hands.setOptions({
+            maxNumHands: 2,
+            modelComplexity: 0, // 0 = LITE (Fastest for Mobile), 1 = FULL
             minDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5
         });
         
-        holistic.onResults(onResults);
+        hands.onResults(onResults);
 
         function startCamera() {
             const camera = new Camera(videoElement, {
                 onFrame: async () => {
-                    await holistic.send({image: videoElement});
+                    await hands.send({image: videoElement});
                 },
-                width: 640,
-                height: 480
+                // Lower resolution for faster processing on phone
+                width: 480, 
+                height: 360 
             });
             camera.start();
         }
 
-        // Init
         loadAssets();
 
     </script>
