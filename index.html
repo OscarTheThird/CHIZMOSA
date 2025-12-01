@@ -1,270 +1,336 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>FSL Client-Side AI</title>
-    <!-- 1. Import TensorFlow.js -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
-    <!-- 2. Import MediaPipe -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <meta charset="utf-8" />
+  <title>FSL Client-Side (Optimized)</title>
 
-    <style>
-        body { background: #222; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-        
-        #container { position: relative; width: 640px; height: 480px; border: 4px solid #444; border-radius: 12px; overflow: hidden; background: #000; }
-        
-        /* Video is hidden, we draw on canvas */
-        #videoElement { display: none; }
-        #canvasElement { width: 100%; height: 100%; transform: scaleX(-1); }
+  <!-- TFJS (keep latest stable) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
 
-        #overlay { position: absolute; top: 10px; left: 10px; background: rgba(0, 0, 0, 0.6); padding: 10px; border-radius: 5px; text-align: left; }
-        
-        #status-display { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 48px; font-weight: bold; text-shadow: 2px 2px 4px #000; z-index: 20; }
-        
-        #progress-container { position: absolute; bottom: 0; left: 0; width: 100%; height: 20px; background: rgba(50, 50, 50, 0.8); }
-        #progress-bar { height: 100%; width: 0%; background: #00ff00; transition: width 0.1s linear; }
+  <!-- MediaPipe -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
-        #prediction-box { margin-top: 20px; font-size: 24px; padding: 20px; background: #333; border-radius: 8px; width: 600px; text-align: center; }
-        .highlight { color: #0f0; font-weight: bold; }
-    </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+
+  <style>
+    body{background:#111;color:#eee;font-family:system-ui,Segoe UI,Roboto,Arial;display:flex;flex-direction:column;align-items:center;padding:8px}
+    #container{position:relative;width:360px;height:270px;border-radius:10px;overflow:hidden;background:#000}
+    video{display:none}
+    canvas{width:100%;height:100%;transform:scaleX(-1);display:block}
+    #overlay{position:absolute;left:8px;top:8px;background:rgba(0,0,0,0.55);padding:8px;border-radius:6px;font-size:14px}
+    #status{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:20px;color:#ffeb3b;text-shadow:0 2px 6px rgba(0,0,0,0.6);pointer-events:none}
+    #prediction{margin-top:12px;font-size:16px;background:#222;padding:12px;border-radius:8px;width:360px;text-align:center}
+    #progress-container{position:absolute;bottom:0;left:0;width:100%;height:6px;background:rgba(255,255,255,0.06)}
+    #progress{height:100%;width:0;background:#76ff03;transition:width .08s linear}
+  </style>
 </head>
 <body>
+  <h2>FSL Client-Side — Mobile Optimized</h2>
 
-    <h1>FSL Client-Side AI</h1>
+  <div id="container">
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
 
-    <div id="container">
-        <video id="videoElement"></video>
-        <canvas id="canvasElement"></canvas>
-        
-        <div id="overlay">
-            <div>Confidence: <span id="conf">0.00</span></div>
-            <div>Current Sign: <span id="curr" class="highlight">-</span></div>
-        </div>
-
-        <div id="status-display">LOADING...</div>
-
-        <div id="progress-container">
-            <div id="progress-bar"></div>
-        </div>
+    <div id="overlay">
+      <div>Sign: <span id="curr">-</span></div>
+      <div>Conf: <span id="conf">0.00</span></div>
     </div>
 
-    <div id="prediction-box">Sentence: <span id="sentence">Waiting...</span></div>
+    <div id="status">LOADING...</div>
 
-    <script>
-        const videoElement = document.getElementById('videoElement');
-        const canvasElement = document.getElementById('canvasElement');
-        const canvasCtx = canvasElement.getContext('2d');
-        const progressBar = document.getElementById('progress-bar');
-        const statusDisplay = document.getElementById('status-display');
-        const currSpan = document.getElementById('curr');
-        const confSpan = document.getElementById('conf');
-        const sentSpan = document.getElementById('sentence');
+    <div id="progress-container"><div id="progress"></div></div>
+  </div>
 
-        let model;
-        let labels = [];
-        let sequence = [];
-        let sentence = [];
-        
-        // Configuration
-        const SEQUENCE_LENGTH = 60; 
-        const THRESHOLD = 0.8;
+  <div id="prediction">Sentence: <span id="sentence">Waiting...</span></div>
 
-        // State Machine
-        const STATE_PREP = 0;
-        const STATE_RECORD = 1;
-        const STATE_RESULT = 2;
-        let currentState = STATE_PREP;
-        let phaseStartTime = 0;
+<script>
+/* ============================
+   Config & UI elements
+   ============================ */
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const currEl = document.getElementById('curr');
+const confEl = document.getElementById('conf');
+const sentEl = document.getElementById('sentence');
+const progressBar = document.getElementById('progress');
 
-        // --- 1. Load Model & Labels ---
-        async function loadAssets() {
-            statusDisplay.innerText = "LOADING MODEL...";
-            try {
-                // Load TFJS Model
-                model = await tf.loadLayersModel('model/model.json');
-                console.log("Model Loaded!");
+let model = null;
+let labels = [];
+const SEQ_LEN = 60;           // keep your 60-frame window
+const KP_LEN = 126;           // 2 hands x 21 landmarks x 3 = 126
+const THRESH = 0.80;
+const DRAW_EVERY_N = 3;       // reduce drawing frequency to save CPU
+const TARGET_FPS = 12;        // throttle holistic frames (~12 fps)
 
-                // Load Labels
-                const response = await fetch('js/labels.json');
-                labels = await response.json();
-                console.log("Labels Loaded!", labels);
-                
-                statusDisplay.innerText = "GET READY";
-                startCamera();
-            } catch (err) {
-                console.error("Error loading assets:", err);
-                statusDisplay.innerText = "ERROR LOADING";
-            }
-        }
+/* ============================
+   Minimal allocation sliding buffer
+   - Use a typed Float32Array as a circular buffer to avoid frequent arrays
+   ============================ */
+const buffer = new Float32Array(SEQ_LEN * KP_LEN);
+let bufferCount = 0;   // how many frames currently stored (≤ SEQ_LEN)
+let bufferHead = 0;    // index of next insertion (0..SEQ_LEN-1)
 
-        // --- 2. Landmark Extraction Logic (Matches Python) ---
-        function extractKeypoints(results) {
-            // Function to Flatten and zero-pad if missing
-            const getHand = (landmarks) => {
-                if (landmarks) {
-                    let flat = [];
-                    for (const lm of landmarks) {
-                        flat.push(lm.x, lm.y, lm.z);
-                    }
-                    return flat;
-                } else {
-                    return new Array(21 * 3).fill(0);
-                }
-            };
+function pushFrameToBuffer(frameArray) {
+  // frameArray expected length KP_LEN
+  const offset = bufferHead * KP_LEN;
+  // copy manually (faster than concat allocations)
+  for (let i = 0; i < KP_LEN; ++i) buffer[offset + i] = frameArray[i] || 0;
+  bufferHead = (bufferHead + 1) % SEQ_LEN;
+  if (bufferCount < SEQ_LEN) bufferCount++;
+}
 
-            const lh = getHand(results.leftHandLandmarks);
-            const rh = getHand(results.rightHandLandmarks);
-            return [...lh, ...rh]; // Concatenate arrays
-        }
+/* Build a contiguous Float32Array in [1,60,126] order for tf */
+function buildInputTensor() {
+  // If buffer is not yet full, pad at front with zeros
+  if (bufferCount < SEQ_LEN) {
+    const pad = new Float32Array((SEQ_LEN - bufferCount) * KP_LEN);
+    const active = new Float32Array(bufferCount * KP_LEN);
+    // copy active frames in order (from head-bufferCount to head-1)
+    let start = (bufferHead - bufferCount + SEQ_LEN) % SEQ_LEN;
+    for (let f = 0; f < bufferCount; ++f) {
+      const srcOff = ((start + f) % SEQ_LEN) * KP_LEN;
+      active.set(buffer.subarray(srcOff, srcOff + KP_LEN), f * KP_LEN);
+    }
+    const all = new Float32Array(pad.length + active.length);
+    all.set(pad, 0);
+    all.set(active, pad.length);
+    return tf.tensor3d(all, [1, SEQ_LEN, KP_LEN]);
+  } else {
+    // buffer full: need to create an array in correct chronological order
+    const out = new Float32Array(SEQ_LEN * KP_LEN);
+    // start = head (oldest frame) because head points to next insertion (newest is head-1)
+    let start = bufferHead % SEQ_LEN;
+    for (let f = 0; f < SEQ_LEN; ++f) {
+      const srcOff = ((start + f) % SEQ_LEN) * KP_LEN;
+      out.set(buffer.subarray(srcOff, srcOff + KP_LEN), f * KP_LEN);
+    }
+    return tf.tensor3d(out, [1, SEQ_LEN, KP_LEN]);
+  }
+}
 
-        // --- 3. MediaPipe Setup ---
-        function onResults(results) {
-            // Draw on Canvas
-            canvasElement.width = videoElement.videoWidth;
-            canvasElement.height = videoElement.videoHeight;
-            canvasCtx.save();
-            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
-            
-            // Draw Connectors
-            drawConnectors(canvasCtx, results.leftHandLandmarks, HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 5});
-            drawLandmarks(canvasCtx, results.leftHandLandmarks, {color: '#00FF00', lineWidth: 2});
-            drawConnectors(canvasCtx, results.rightHandLandmarks, HAND_CONNECTIONS, {color: '#00CC00', lineWidth: 5});
-            drawLandmarks(canvasCtx, results.rightHandLandmarks, {color: '#FF0000', lineWidth: 2});
-            canvasCtx.restore();
+/* ============================
+   TFJS Backend + Model Loading
+   ============================ */
+async function initTF() {
+  statusEl.innerText = "INIT TF BACKEND...";
+  // Force WebGL (GPU) backend for performance on mobile Chrome/Android
+  try {
+    await tf.setBackend('webgl');
+    await tf.ready();
+    console.log('TF Backend:', tf.getBackend());
+  } catch (err) {
+    console.warn('Failed to set WebGL backend, falling back to default', err);
+  }
+}
 
-            // --- MAIN LOGIC LOOP ---
-            const now = Date.now();
-            if (phaseStartTime === 0) phaseStartTime = now;
-            const elapsed = now - phaseStartTime;
+async function loadModelAndLabels() {
+  statusEl.innerText = "LOADING MODEL...";
+  try {
+    model = await tf.loadLayersModel('model/model.json'); // assumes model hosted at model/model.json
+    // warm up with a zeros tensor
+    model.predict(tf.zeros([1, SEQ_LEN, KP_LEN])).dispose();
+    console.log('Model loaded');
 
-            if (currentState === STATE_PREP) {
-                const progress = Math.min(elapsed / 2000, 1.0) * 100;
-                progressBar.style.width = progress + "%";
-                progressBar.style.backgroundColor = "yellow";
-                statusDisplay.innerText = "GET READY";
-                statusDisplay.style.color = "yellow";
+    // load labels.json (expects array of labels)
+    const res = await fetch('js/labels.json');
+    labels = await res.json();
+    console.log('Labels loaded', labels);
+    statusEl.innerText = "READY";
+  } catch (err) {
+    console.error('Model load error', err);
+    statusEl.innerText = "ERROR LOADING MODEL";
+  }
+}
 
-                if (elapsed >= 2000) {
-                    currentState = STATE_RECORD;
-                    phaseStartTime = Date.now();
-                    sequence = []; // Clear buffer
-                }
+/* ============================
+   MediaPipe Holistic Setup
+   - Lower resolution (320x240), throttle frames, reduce drawing
+   ============================ */
+const holistic = new Holistic({
+  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`
+});
 
-            } else if (currentState === STATE_RECORD) {
-                const progress = Math.min(elapsed / 2000, 1.0) * 100;
-                progressBar.style.width = progress + "%";
-                progressBar.style.backgroundColor = "red";
-                statusDisplay.innerText = "RECORDING";
-                statusDisplay.style.color = "red";
+holistic.setOptions({
+  modelComplexity: 0,          // FAST mode for mobile — change to 1 if device can handle it
+  smoothLandmarks: true,
+  minDetectionConfidence: 0.5,
+  minTrackingConfidence: 0.5
+});
 
-                // COLLECT DATA
-                const keypoints = extractKeypoints(results);
-                sequence.push(keypoints);
+let lastFrameTime = 0;
+let drawCounter = 0;
+let sentence = [];
 
-                if (elapsed >= 2000) {
-                    currentState = STATE_RESULT;
-                    phaseStartTime = Date.now();
-                    runPrediction(); // Trigger prediction at end of recording
-                }
+holistic.onResults((results) => {
+  // throttle: aim for TARGET_FPS
+  const now = performance.now();
+  if (now - lastFrameTime < 1000 / TARGET_FPS) {
+    return; // skip this frame entirely
+  }
+  lastFrameTime = now;
 
-            } else if (currentState === STATE_RESULT) {
-                const progress = Math.min(elapsed / 2000, 1.0) * 100;
-                progressBar.style.width = (100 - progress) + "%";
-                progressBar.style.backgroundColor = "#00ff00";
-                
-                // Display is handled by runPrediction, text stays visible
-                statusDisplay.style.color = "#00ff00";
+  // set canvas size to video size once available
+  if (video.videoWidth && video.videoHeight) {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
 
-                if (elapsed >= 2000) {
-                    currentState = STATE_PREP;
-                    phaseStartTime = Date.now();
-                }
-            }
-        }
+  // minimal drawing: update canvas every DRAW_EVERY_N frames
+  if ((drawCounter++ % DRAW_EVERY_N) === 0) {
+    ctx.save();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+    // only draw hand landmarks (lighter than full-body)
+    if (results.leftHandLandmarks) {
+      drawConnectors(ctx, results.leftHandLandmarks, HAND_CONNECTIONS, {lineWidth:2, color:'#00ff00'});
+      drawLandmarks(ctx, results.leftHandLandmarks, {lineWidth:1, color:'#00ff00'});
+    }
+    if (results.rightHandLandmarks) {
+      drawConnectors(ctx, results.rightHandLandmarks, HAND_CONNECTIONS, {lineWidth:2, color:'#ff8800'});
+      drawLandmarks(ctx, results.rightHandLandmarks, {lineWidth:1, color:'#ff8800'});
+    }
+    ctx.restore();
+  }
 
-        // --- 4. Prediction Logic ---
-        async function runPrediction() {
-            if (sequence.length < 5) return; // Not enough data
+  // Extract keypoints for both hands and push to buffer
+  const keypoints = extractKeypoints(results); // 126-length Float32Array or Array
+  pushFrameToBuffer(keypoints);
 
-            // Pad sequence to exactly 60 frames
-            // Note: TFJS needs a tensor of shape [1, 60, 126]
-            
-            // 1. Fill or Trim to 60
-            let finalSeq = [];
-            if (sequence.length >= SEQUENCE_LENGTH) {
-                finalSeq = sequence.slice(sequence.length - SEQUENCE_LENGTH);
-            } else {
-                // Pad with zeros at the start
-                const paddingCount = SEQUENCE_LENGTH - sequence.length;
-                const zeroFrame = new Array(126).fill(0);
-                for(let i=0; i<paddingCount; i++) finalSeq.push(zeroFrame);
-                finalSeq = finalSeq.concat(sequence);
-            }
+  // If enough frames, build tensor and run prediction (sliding window)
+  if (bufferCount > 4) { // small guard; avoid running very early
+    runPredictionIfReady();
+  }
 
-            // 2. Convert to Tensor
-            const inputTensor = tf.tensor3d([finalSeq]);
+  // update progress bar (how full the buffer is)
+  progressBar.style.width = Math.round((bufferCount / SEQ_LEN) * 100) + '%';
+});
 
-            // 3. Predict
-            const prediction = model.predict(inputTensor);
-            const values = await prediction.data();
-            const maxVal = Math.max(...values);
-            const maxIndex = values.indexOf(maxVal);
+/* Extract keypoints: two hands only, flattened [126] */
+function extractKeypoints(results) {
+  // returns a plain Float32Array or regular Array length 126
+  const getHand = (landmarks) => {
+    if (!landmarks) return new Float32Array(21 * 3).fill(0);
+    const out = new Float32Array(21 * 3);
+    for (let i = 0; i < landmarks.length && i < 21; ++i) {
+      out[i*3 + 0] = landmarks[i].x;
+      out[i*3 + 1] = landmarks[i].y;
+      out[i*3 + 2] = landmarks[i].z || 0;
+    }
+    return out;
+  };
+  const lh = getHand(results.leftHandLandmarks);
+  const rh = getHand(results.rightHandLandmarks);
+  // concat into one Float32Array
+  const both = new Float32Array(KP_LEN);
+  both.set(lh, 0);
+  both.set(rh, lh.length);
+  return both;
+}
 
-            // 4. Update UI
-            const predictedSign = labels[maxIndex];
-            confSpan.innerText = maxVal.toFixed(2);
+/* ============================
+   Prediction code (fast & safe)
+   - use dataSync() for faster synchronous read
+   - dispose tensors immediately
+   ============================ */
+let lastPredTime = 0;
+const PRED_INTERVAL = 120; // ms: minimal gap between predictions (avoid spamming on slow phones)
 
-            if (maxVal > THRESHOLD) {
-                currSpan.innerText = predictedSign;
-                statusDisplay.innerText = predictedSign;
-                
-                // Sentence Logic
-                if (sentence.length === 0 || predictedSign !== sentence[sentence.length - 1]) {
-                    sentence.push(predictedSign);
-                    if (sentence.length > 5) sentence.shift();
-                    sentSpan.innerText = sentence.join(" ");
-                }
-            } else {
-                currSpan.innerText = "...";
-                statusDisplay.innerText = "LOW CONFIDENCE";
-            }
-            
-            // Clean up tensor memory
-            inputTensor.dispose();
-            prediction.dispose();
-        }
+async function runPredictionIfReady() {
+  const now = performance.now();
+  if (now - lastPredTime < PRED_INTERVAL) return; // throttle predictions
+  lastPredTime = now;
 
-        // --- 5. Start ---
-        const holistic = new Holistic({locateFile: (file) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
-        }});
-        
-        holistic.setOptions({
-            modelComplexity: 1,
-            smoothLandmarks: true,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
-        });
-        
-        holistic.onResults(onResults);
+  // Build input tensor from buffer; tf.tensor3d accepts a typed array
+  const inputTensor = buildInputTensor(); // shape [1, SEQ_LEN, KP_LEN]
+  try {
+    // call predict and use dataSync (faster than async)
+    const logits = model.predict(inputTensor);
+    // ensure logits is a tensor
+    const values = logits.dataSync(); // synchronous read
+    // find max index
+    let maxVal = -Infinity, maxIdx = -1;
+    for (let i = 0; i < values.length; ++i) {
+      if (values[i] > maxVal) { maxVal = values[i]; maxIdx = i; }
+    }
+    // update UI
+    confEl.innerText = maxVal.toFixed(2);
+    if (maxVal >= THRESH) {
+      const predicted = labels[maxIdx] || `#${maxIdx}`;
+      currEl.innerText = predicted;
+      statusEl.innerText = predicted;
+      // sentence smoothing: append only when sign changes
+      if (sentence.length === 0 || sentence[sentence.length - 1] !== predicted) {
+        sentence.push(predicted);
+        if (sentence.length > 6) sentence.shift();
+        sentEl.innerText = sentence.join(' ');
+      }
+    } else {
+      currEl.innerText = '...';
+      statusEl.innerText = 'LOW CONF';
+    }
+    // dispose logits if necessary
+    if (Array.isArray(logits)) {
+      logits.forEach(t => t.dispose && t.dispose());
+    } else if (logits && logits.dispose) {
+      logits.dispose();
+    }
+  } catch (err) {
+    console.error('Prediction error', err);
+  } finally {
+    inputTensor.dispose();
+  }
+}
 
-        function startCamera() {
-            const camera = new Camera(videoElement, {
-                onFrame: async () => {
-                    await holistic.send({image: videoElement});
-                },
-                width: 640,
-                height: 480
-            });
-            camera.start();
-        }
+/* ============================
+   Camera start (smaller resolution)
+   - 320 x 240 is a reasonable mobile compromise
+   ============================ */
+function startCamera() {
+  // Use MediaPipe Camera util which calls holistic.send for each frame
+  const camera = new Camera(video, {
+    onFrame: async () => {
+      // send image to holistic (we throttle in onResults)
+      await holistic.send({image: video});
+    },
+    width: 320, height: 240
+  });
+  camera.start();
+}
 
-        // Init
-        loadAssets();
+/* ============================
+   Init everything
+   ============================ */
+async function boot() {
+  try {
+    statusEl.innerText = "INITIALIZING...";
+    await initTF();
+    await loadModelAndLabels();
 
-    </script>
+    // request camera permissions before starting holistic
+    await navigator.mediaDevices.getUserMedia({video:{facingMode:'user', width:320, height:240}}).then(stream => {
+      video.srcObject = stream;
+      video.play();
+    }).catch(err => {
+      console.error('Camera error', err);
+      statusEl.innerText = 'CAMERA ERROR';
+      throw err;
+    });
+
+    startCamera();
+    statusEl.innerText = "GET READY";
+    setTimeout(()=> statusEl.innerText = "SHOW SIGN", 800);
+  } catch (err) {
+    console.error('Boot error', err);
+    statusEl.innerText = "INIT FAILED";
+  }
+}
+
+boot();
+
+</script>
 </body>
 </html>
