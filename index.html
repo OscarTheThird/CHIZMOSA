@@ -2,8 +2,12 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FSL Client-Side AI (Holistic Lite)</title>
+    <title>FSL Client-Side AI (WASM Optimized)</title>
+    
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js"></script>
+
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
@@ -25,11 +29,14 @@
 
         #prediction-box { margin-top: 15px; font-size: 18px; padding: 15px; background: #333; border-radius: 8px; width: 90%; max-width: 480px; text-align: center; }
         .highlight { color: #0f0; font-weight: bold; }
+        
+        /* Debug info for backend */
+        #backend-info { position: fixed; bottom: 5px; right: 5px; font-size: 12px; color: #888; }
     </style>
 </head>
 <body>
 
-    <h3>FSL AI (Holistic Lite)</h3>
+    <h3>FSL AI (WASM + SIMD)</h3>
 
     <div id="container">
         <video id="videoElement" playsinline></video>
@@ -40,7 +47,7 @@
             <div>Sign: <span id="curr" class="highlight">-</span></div>
         </div>
 
-        <div id="status-display">LOADING...</div>
+        <div id="status-display">INIT WASM...</div>
 
         <div id="progress-container">
             <div id="progress-bar"></div>
@@ -48,6 +55,7 @@
     </div>
 
     <div id="prediction-box">Sentence: <span id="sentence">Waiting...</span></div>
+    <div id="backend-info">Backend: Initializing...</div>
 
     <script>
         const videoElement = document.getElementById('videoElement');
@@ -58,6 +66,7 @@
         const currSpan = document.getElementById('curr');
         const confSpan = document.getElementById('conf');
         const sentSpan = document.getElementById('sentence');
+        const backendInfo = document.getElementById('backend-info');
 
         let model;
         let labels = [];
@@ -73,22 +82,49 @@
         let currentState = STATE_PREP;
         let phaseStartTime = 0;
 
+        // --- 1. SETUP WASM BACKEND & LOAD MODEL ---
         async function loadAssets() {
-            statusDisplay.innerText = "LOADING MODEL...";
+            statusDisplay.innerText = "LOADING WASM...";
+            
             try {
+                // EXPLICITLY SET WASM PATHS (Fixes CDN issues)
+                // This points to the .wasm binary files on the CDN
+                tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/');
+                
+                // FORCE BACKEND TO WASM
+                await tf.setBackend('wasm');
+                await tf.ready(); // Wait for it to initialize
+
+                // Check if it worked
+                const currentBackend = tf.getBackend();
+                console.log("Current TF Backend:", currentBackend);
+                backendInfo.innerText = `Backend: ${currentBackend.toUpperCase()}`;
+
+                statusDisplay.innerText = "LOADING MODEL...";
+                
+                // Load Model
                 model = await tf.loadLayersModel('model/model.json');
+                
+                // Warmup the model (runs 1 dummy prediction to compile shaders/wasm)
+                const zeroTensor = tf.zeros([1, 60, 126]);
+                model.predict(zeroTensor).dispose();
+                zeroTensor.dispose();
+
+                // Load Labels
                 const response = await fetch('js/labels.json');
                 labels = await response.json();
+                
                 statusDisplay.innerText = "STARTING CAM...";
                 startCamera();
+
             } catch (err) {
-                console.error(err);
-                statusDisplay.innerText = "ERROR LOADING";
+                console.error("Setup Error:", err);
+                statusDisplay.innerText = "ERROR";
+                backendInfo.innerText = "Error: " + err.message;
             }
         }
 
-        // --- REVERTED TO HOLISTIC EXTRACTION ---
-        // This ensures the data format (Left/Right order & Z-scale) matches your training
+        // --- 2. KEYPOINT EXTRACTION (Holistic) ---
         function extractKeypoints(results) {
             const getHand = (landmarks) => {
                 if (landmarks) {
@@ -104,6 +140,7 @@
             return [...lh, ...rh];
         }
 
+        // --- 3. MEDIAPIPE LOOP ---
         function onResults(results) {
             canvasElement.width = videoElement.videoWidth;
             canvasElement.height = videoElement.videoHeight;
@@ -111,7 +148,6 @@
             canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
             canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
             
-            // Draw only hands to keep UI clean and fast
             drawConnectors(canvasCtx, results.leftHandLandmarks, HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 3});
             drawLandmarks(canvasCtx, results.leftHandLandmarks, {color: '#00FF00', lineWidth: 1});
             drawConnectors(canvasCtx, results.rightHandLandmarks, HAND_CONNECTIONS, {color: '#00CC00', lineWidth: 3});
@@ -151,8 +187,10 @@
             }
         }
 
+        // --- 4. PREDICTION LOGIC ---
         async function runPrediction() {
             if (sequence.length < 5) return; 
+            
             let finalSeq = [];
             if (sequence.length >= SEQUENCE_LENGTH) {
                 finalSeq = sequence.slice(sequence.length - SEQUENCE_LENGTH);
@@ -163,41 +201,43 @@
                 finalSeq = finalSeq.concat(sequence);
             }
 
-            const inputTensor = tf.tensor3d([finalSeq]);
-            const prediction = model.predict(inputTensor);
-            const values = await prediction.data();
-            const maxVal = Math.max(...values);
-            const maxIndex = values.indexOf(maxVal);
+            // Tidy is crucial in WASM to prevent memory leaks!
+            tf.tidy(() => {
+                const inputTensor = tf.tensor3d([finalSeq]);
+                const prediction = model.predict(inputTensor);
+                const values = prediction.dataSync(); // Sync is okay in WASM/Tidy
+                
+                const maxVal = Math.max(...values);
+                const maxIndex = values.indexOf(maxVal);
+                const predictedSign = labels[maxIndex];
 
-            const predictedSign = labels[maxIndex];
-            confSpan.innerText = maxVal.toFixed(2);
+                confSpan.innerText = maxVal.toFixed(2);
 
-            if (maxVal > THRESHOLD) {
-                currSpan.innerText = predictedSign;
-                statusDisplay.innerText = predictedSign;
-                if (sentence.length === 0 || predictedSign !== sentence[sentence.length - 1]) {
-                    sentence.push(predictedSign);
-                    if (sentence.length > 5) sentence.shift();
-                    sentSpan.innerText = sentence.join(" ");
+                if (maxVal > THRESHOLD) {
+                    currSpan.innerText = predictedSign;
+                    statusDisplay.innerText = predictedSign;
+                    if (sentence.length === 0 || predictedSign !== sentence[sentence.length - 1]) {
+                        sentence.push(predictedSign);
+                        if (sentence.length > 5) sentence.shift();
+                        sentSpan.innerText = sentence.join(" ");
+                    }
+                } else {
+                    currSpan.innerText = "...";
+                    statusDisplay.innerText = "LOW CONFIDENCE";
                 }
-            } else {
-                currSpan.innerText = "...";
-                statusDisplay.innerText = "LOW CONFIDENCE";
-            }
-            inputTensor.dispose();
-            prediction.dispose();
+            });
         }
 
-        // --- OPTIMIZED HOLISTIC ---
+        // --- 5. INITIALIZE MEDIAPIPE ---
         const holistic = new Holistic({locateFile: (file) => {
             return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
         }});
         
         holistic.setOptions({
-            modelComplexity: 0, // 0 = Lite (Fast!), 1 = Full, 2 = Heavy
+            modelComplexity: 0, // 0 = Lite (Best for Mobile WASM)
             smoothLandmarks: true,
-            enableSegmentation: false, // Save CPU
-            enableFaceMesh: false,     // Save CPU (we don't need face points)
+            enableSegmentation: false,
+            enableFaceMesh: false,
             refineFaceLandmarks: false,
             minDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5
@@ -210,8 +250,8 @@
                 onFrame: async () => {
                     await holistic.send({image: videoElement});
                 },
-                width: 320, // Low res for speed
-                height: 240
+                width: 480,
+                height: 360
             });
             camera.start();
         }
