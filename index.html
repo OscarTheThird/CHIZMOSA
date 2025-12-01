@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FSL Speed Fix</title>
+    <title>FSL Speed AI</title>
     
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js"></script>
@@ -12,30 +12,30 @@
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
     <style>
-        body { background: #000; color: #0f0; font-family: monospace; display: flex; flex-direction: column; align-items: center; height: 100vh; margin: 0; overflow: hidden; }
+        body { background: #222; color: white; font-family: monospace; display: flex; flex-direction: column; align-items: center; height: 100vh; margin: 0; overflow: hidden; }
         
-        /* Container scales the 320x240 video up to fit screen */
-        #container { position: relative; width: 100%; max-width: 640px; aspect-ratio: 4/3; border: 2px solid #333; background: #111; }
+        #container { position: relative; width: 100%; max-width: 640px; aspect-ratio: 4/3; border: 4px solid #444; border-radius: 12px; overflow: hidden; background: #000; margin-top: 20px; }
         
         #videoElement { display: none; }
-        
-        /* Canvas is low-res internally, but stretched by CSS */
-        #canvasElement { width: 100%; height: 100%; transform: scaleX(-1); image-rendering: pixelated; }
+        #canvasElement { width: 100%; height: 100%; transform: scaleX(-1); }
 
-        /* HUD */
+        /* Overlay UI */
         #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; padding: 10px; display: flex; flex-direction: column; justify-content: space-between; }
         
-        .stat-box { background: rgba(0,0,0,0.6); padding: 4px 8px; border-radius: 4px; pointer-events: auto; font-size: 14px; margin-bottom: 4px; width: fit-content; }
-        
-        #status-msg { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 24px; text-align: center; text-shadow: 0 2px 4px #000; color: #fff; width: 100%; pointer-events: none; }
+        #status-display { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 48px; font-weight: bold; text-shadow: 2px 2px 4px #000; z-index: 20; text-align: center; width: 100%; }
 
-        #controls { padding: 10px; width: 100%; display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; background: #111; border-top: 1px solid #333; }
-        
-        button { background: #333; color: white; border: 1px solid #555; padding: 8px 12px; border-radius: 4px; font-size: 12px; cursor: pointer; }
-        button.active { border-color: #0f0; color: #0f0; background: #000; }
+        #progress-container { position: absolute; bottom: 0; left: 0; width: 100%; height: 20px; background: rgba(50, 50, 50, 0.8); }
+        #progress-bar { height: 100%; width: 0%; transition: width 0.1s linear, background-color 0.2s ease; }
 
-        #prediction-box { font-size: 1.5rem; color: #fff; margin-top: 5px; text-align: center; width: 100%; }
-        .pred-highlight { color: #0f0; font-weight: bold; }
+        #prediction-box { margin-top: 20px; font-size: 24px; padding: 20px; background: #333; border-radius: 8px; width: 90%; max-width: 600px; text-align: center; }
+        .highlight { color: #0f0; font-weight: bold; }
+        
+        .stats { background: rgba(0,0,0,0.6); padding: 5px; border-radius: 4px; display: inline-block; font-size: 14px; }
+
+        /* Button Styling */
+        .controls { margin-top: 15px; display: flex; gap: 10px; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #444; color: white; border: 1px solid #666; border-radius: 5px; }
+        button:hover { background: #666; }
     </style>
 </head>
 <body>
@@ -45,95 +45,86 @@
         <canvas id="canvasElement"></canvas>
         
         <div id="ui-layer">
-            <div>
-                <div class="stat-box">FPS: <span id="fps-val">0</span></div>
-                <div class="stat-box">Backend: <span id="backend-val">...</span></div>
-                <div class="stat-box">Res: 320x240</div>
+            <div style="pointer-events: auto;">
+                <div class="stats">FPS: <span id="fps-val">0</span></div>
+                <div class="stats">Conf: <span id="conf">0.00</span></div>
             </div>
-            <div id="status-msg">LOADING...</div>
-            <div style="position: absolute; bottom: 10px; right: 10px; text-align: right;">
-                <div class="stat-box">Conf: <span id="conf-val">0.00</span></div>
-            </div>
+            <div id="status-display">LOADING...</div>
+        </div>
+
+        <div id="progress-container">
+            <div id="progress-bar"></div>
         </div>
     </div>
 
-    <div id="prediction-box"><span id="sentence" class="pred-highlight">...</span></div>
+    <div id="prediction-box">Sentence: <span id="sentence" class="highlight">Waiting...</span></div>
 
-    <div id="controls">
-        <button id="btn-wasm" onclick="setBackend('wasm')">WASM (CPU)</button>
-        <button id="btn-webgl" onclick="setBackend('webgl')">WebGL (GPU)</button>
-        <button id="btn-swap" onclick="toggleSwap()">Swap L/R</button>
-        <button onclick="toggleSkeleton()">Toggle Lines</button>
-    </div>
+    <div class="controls">
+        <button onclick="toggleSwap()">Swap L/R</button>
+        <button onclick="toggleVisuals()">Toggle Visuals</button> </div>
 
     <script>
+        // --- CONFIGURATION ---
         const CONFIG = {
             SEQUENCE_LENGTH: 60,
-            TARGET_FPS: 30, // For interpolation
-            THRESHOLD: 0.8,
-            WIDTH: 640,  // LOW RESOLUTION!
-            HEIGHT: 350
+            WIDTH: 320,  
+            HEIGHT: 240,
+            THRESHOLD: 0.8
         };
 
+        // --- STATE MACHINE CONSTANTS ---
+        const STATE_PREP = 0;
+        const STATE_RECORD = 1;
+        const STATE_RESULT = 2;
+
+        // DOM Elements
         const video = document.getElementById('videoElement');
         const canvas = document.getElementById('canvasElement');
         const ctx = canvas.getContext('2d');
-        const statusMsg = document.getElementById('status-msg');
-        const fpsVal = document.getElementById('fps-val');
-        const backendVal = document.getElementById('backend-val');
-        const confVal = document.getElementById('conf-val');
+        const progressBar = document.getElementById('progress-bar');
+        const statusDisplay = document.getElementById('status-display');
+        const confSpan = document.getElementById('conf');
         const sentSpan = document.getElementById('sentence');
+        const fpsVal = document.getElementById('fps-val');
 
-        // State
+        // Logic Variables
         let model, hands;
         let labels = [];
         let sequence = [];
         let sentence = [];
+        let currentState = STATE_PREP;
+        let phaseStartTime = 0;
+        
+        // Performance Variables
         let lastFrameTime = 0;
         let isProcessing = false;
-        let isSwapMode = false; 
-        let showSkeleton = true;
+        let isCameraReady = false;
+        let isSwapMode = false;
+        let showLandmarks = true; // NEW STATE VARIABLE
 
+        // --- 1. INITIALIZATION ---
         async function init() {
-            // Force WASM paths first
-            try {
-                tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/');
-            } catch(e) { console.log("Wasm paths error (ignore if using bundler)"); }
+            startLoop(); 
             
-            await setBackend('wasm'); // Default to WASM
+            try { tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/'); } catch(e){}
+            await tf.setBackend('wasm');
+            
             loadModel();
         }
 
-        async function setBackend(type) {
-            statusMsg.innerText = "SWITCHING ENGINE...";
-            try {
-                await tf.setBackend(type);
-                backendVal.innerText = tf.getBackend().toUpperCase();
-                
-                // Highlight active button
-                document.getElementById('btn-wasm').className = type === 'wasm' ? 'active' : '';
-                document.getElementById('btn-webgl').className = type === 'webgl' ? 'active' : '';
-                
-                statusMsg.innerText = "";
-            } catch (err) {
-                alert("Backend switch failed: " + err.message);
-            }
-        }
-
         async function loadModel() {
-            statusMsg.innerText = "LOADING MODEL...";
+            statusDisplay.innerText = "LOADING AI...";
             try {
                 model = await tf.loadLayersModel('model/model.json');
-                // Warmup
-                tf.tidy(() => model.predict(tf.zeros([1, 60, 126])));
-
-                const lblRes = await fetch('js/labels.json');
-                labels = await lblRes.json();
-
+                tf.tidy(() => model.predict(tf.zeros([1, 60, 126]))); // Warmup
+                
+                const response = await fetch('js/labels.json');
+                labels = await response.json();
+                
                 setupMediaPipe();
-            } catch (e) {
-                statusMsg.innerText = "LOAD ERROR";
-                console.error(e);
+            } catch (err) {
+                statusDisplay.innerText = "MODEL ERROR";
+                console.error(err);
             }
         }
 
@@ -141,7 +132,7 @@
             hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
             hands.setOptions({
                 maxNumHands: 2,
-                modelComplexity: 0, // 0 = Lite (Fastest)
+                modelComplexity: 0, 
                 minDetectionConfidence: 0.5,
                 minTrackingConfidence: 0.5
             });
@@ -151,127 +142,168 @@
 
         async function startCamera() {
             try {
-                // Request lowest resolution possible
                 const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { 
-                        width: { ideal: CONFIG.WIDTH }, 
-                        height: { ideal: CONFIG.HEIGHT }, 
-                        facingMode: "user" 
-                    }
+                    video: { width: { ideal: CONFIG.WIDTH }, height: { ideal: CONFIG.HEIGHT }, facingMode: "user" }
                 });
                 video.srcObject = stream;
                 video.onloadedmetadata = () => {
                     video.play();
-                    // Force canvas to match the LOW internal resolution
                     canvas.width = CONFIG.WIDTH;
                     canvas.height = CONFIG.HEIGHT;
-                    statusMsg.innerText = "";
-                    loop();
+                    isCameraReady = true;
+                    phaseStartTime = Date.now(); 
                 };
-            } catch (e) {
-                statusMsg.innerText = "CAM ERROR";
-            }
+            } catch (e) { statusDisplay.innerText = "CAM ERROR"; }
         }
 
-        function loop() {
-            // Draw video to low-res canvas
-            ctx.drawImage(video, 0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
-            
-            if (!isProcessing) {
-                isProcessing = true;
-                // Send low-res image to MediaPipe
-                hands.send({image: canvas}).then(() => {
-                    isProcessing = false;
-                });
-            }
-            requestAnimationFrame(loop);
-        }
-
-        function onResults(results) {
-            const now = performance.now();
-            const delta = now - lastFrameTime;
-            lastFrameTime = now;
-            fpsVal.innerText = Math.round(1000 / delta);
-
-            // Draw Skeleton (Optional - disabling saves 1-2 FPS)
-            if (showSkeleton) {
-                ctx.save();
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height); // Redraw clean frame
-                if (results.multiHandLandmarks) {
-                    for (const landmarks of results.multiHandLandmarks) {
-                        drawConnectors(ctx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 1});
-                        drawLandmarks(ctx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 2});
+        // --- 2. FAST DRAW LOOP ---
+        function startLoop() {
+            function step() {
+                if (isCameraReady) {
+                    // Note: We don't draw here anymore, onResults handles it all to sync visual/logic
+                    if (!isProcessing) {
+                        isProcessing = true;
+                        hands.send({image: video}).then(() => { isProcessing = false; });
                     }
                 }
-                ctx.restore();
+                requestAnimationFrame(step);
             }
+            step();
+        }
 
-            // --- DATA LOGIC ---
-            const keypoints = extractKeypoints(results);
-            
-            // Smart Interpolation (Fixes 30FPS model lag)
-            const framesToGen = Math.max(1, Math.round(delta / 33)); // 33ms = 30fps
-            for(let i=0; i < framesToGen; i++) {
+        // --- 3. LOGIC LOOP ---
+        function onResults(results) {
+            // FPS Calculation
+            const now = performance.now();
+            fpsVal.innerText = Math.round(1000 / (now - lastFrameTime));
+            lastFrameTime = now;
+
+            // Draw Video Frame (ALWAYS DO THIS)
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+            // Draw Skeleton (ONLY IF ENABLED)
+            if (showLandmarks && results.multiHandLandmarks) {
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(ctx, landmarks, HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 1});
+                    drawLandmarks(ctx, landmarks, {color: '#00FF00', lineWidth: 1, radius: 2});
+                }
+            }
+            ctx.restore();
+
+            // --- STATE MACHINE LOGIC ---
+            // (Note: This logic runs regardless of showLandmarks!)
+            const timeNow = Date.now();
+            const elapsed = timeNow - phaseStartTime;
+
+            if (currentState === STATE_PREP) {
+                const progress = Math.min(elapsed / 2000, 1.0) * 100;
+                progressBar.style.width = progress + "%";
+                progressBar.style.backgroundColor = "yellow";
+                
+                statusDisplay.innerText = "GET READY";
+                statusDisplay.style.color = "yellow";
+
+                if (elapsed >= 2000) {
+                    currentState = STATE_RECORD;
+                    phaseStartTime = Date.now();
+                    sequence = []; 
+                }
+
+            } else if (currentState === STATE_RECORD) {
+                const progress = Math.min(elapsed / 2000, 1.0) * 100;
+                progressBar.style.width = progress + "%";
+                progressBar.style.backgroundColor = "red";
+                
+                statusDisplay.innerText = "RECORDING";
+                statusDisplay.style.color = "red";
+
+                // COLLECT DATA (Still works even if landmarks invisible!)
+                const keypoints = extractKeypoints(results);
                 sequence.push(keypoints);
-                if (sequence.length > CONFIG.SEQUENCE_LENGTH) sequence.shift();
-            }
 
-            if (sequence.length === CONFIG.SEQUENCE_LENGTH) {
-                tf.tidy(() => {
-                    const input = tf.tensor3d([sequence]);
-                    const pred = model.predict(input);
-                    const values = pred.dataSync();
-                    const maxVal = Math.max(...values);
-                    const idx = values.indexOf(maxVal);
-                    
-                    if (maxVal > CONFIG.THRESHOLD) {
-                        const word = labels[idx];
-                        confVal.innerText = maxVal.toFixed(2);
-                        statusMsg.innerText = word;
-                        updateSentence(word);
-                    } else {
-                        statusMsg.innerText = "";
-                    }
-                });
+                if (elapsed >= 2000) {
+                    currentState = STATE_RESULT;
+                    phaseStartTime = Date.now();
+                    runPrediction(); 
+                }
+
+            } else if (currentState === STATE_RESULT) {
+                const progress = Math.min(elapsed / 2000, 1.0) * 100;
+                progressBar.style.width = (100 - progress) + "%";
+                progressBar.style.backgroundColor = "#00ff00";
+                statusDisplay.style.color = "#00ff00";
+
+                if (elapsed >= 2000) {
+                    currentState = STATE_PREP;
+                    phaseStartTime = Date.now();
+                }
             }
         }
 
+        // --- 4. PREDICTION LOGIC ---
+        async function runPrediction() {
+            if (sequence.length < 5) {
+                statusDisplay.innerText = "NO DATA";
+                return;
+            }
+
+            let finalSeq = [];
+            if (sequence.length >= CONFIG.SEQUENCE_LENGTH) {
+                finalSeq = sequence.slice(sequence.length - CONFIG.SEQUENCE_LENGTH);
+            } else {
+                const paddingCount = CONFIG.SEQUENCE_LENGTH - sequence.length;
+                const zeroFrame = new Array(126).fill(0);
+                for(let i=0; i<paddingCount; i++) finalSeq.push(zeroFrame);
+                finalSeq = finalSeq.concat(sequence);
+            }
+
+            tf.tidy(() => {
+                const input = tf.tensor3d([finalSeq]);
+                const pred = model.predict(input);
+                const values = pred.dataSync();
+                const maxVal = Math.max(...values);
+                const idx = values.indexOf(maxVal);
+                
+                const predictedSign = labels[idx];
+                confSpan.innerText = maxVal.toFixed(2);
+
+                if (maxVal > CONFIG.THRESHOLD) {
+                    statusDisplay.innerText = predictedSign;
+                    if (sentence.length === 0 || predictedSign !== sentence[sentence.length - 1]) {
+                        sentence.push(predictedSign);
+                        if (sentence.length > 5) sentence.shift();
+                        sentSpan.innerText = sentence.join(" ");
+                    }
+                } else {
+                    statusDisplay.innerText = "LOW CONFIDENCE";
+                }
+            });
+        }
+
+        // --- 5. KEYPOINT EXTRACTION ---
         function extractKeypoints(results) {
             let lh = new Array(63).fill(0);
             let rh = new Array(63).fill(0);
+            
             if (results.multiHandLandmarks && results.multiHandedness) {
                 for (let i = 0; i < results.multiHandLandmarks.length; i++) {
                     let label = results.multiHandedness[i].label;
                     if (isSwapMode) label = (label === "Left") ? "Right" : "Left";
-
+                    
                     const lm = results.multiHandLandmarks[i];
                     const flat = [];
                     for (const p of lm) flat.push(p.x, p.y, p.z);
                     
-                    if (label === "Left") lh = flat;
-                    else rh = flat;
+                    if (label === "Left") lh = flat; else rh = flat;
                 }
             }
             return [...lh, ...rh];
         }
 
-        function updateSentence(word) {
-            if (sentence.length === 0 || word !== sentence[sentence.length-1]) {
-                sentence.push(word);
-                if (sentence.length > 5) sentence.shift();
-                sentSpan.innerText = sentence.join(" ");
-            }
-        }
-
-        function toggleSwap() {
-            isSwapMode = !isSwapMode;
-            document.getElementById('btn-swap').className = isSwapMode ? 'active' : '';
-        }
-
-        function toggleSkeleton() {
-            showSkeleton = !showSkeleton;
-        }
+        function toggleSwap() { isSwapMode = !isSwapMode; }
+        function toggleVisuals() { showLandmarks = !showLandmarks; } // NEW FUNCTION
 
         init();
     </script>
