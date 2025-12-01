@@ -2,255 +2,274 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>FSL Client-Side AI (WASM Optimized)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FSL Speed AI</title>
     
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js"></script>
-
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
     <style>
-        body { background: #222; color: white; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        body { background: #222; color: white; font-family: monospace; display: flex; flex-direction: column; align-items: center; height: 100vh; margin: 0; overflow: hidden; }
         
-        #container { position: relative; width: 100%; max-width: 480px; aspect-ratio: 4/3; border: 4px solid #444; border-radius: 12px; overflow: hidden; background: #000; }
+        #container { position: relative; width: 100%; max-width: 640px; aspect-ratio: 4/3; border: 4px solid #444; border-radius: 12px; overflow: hidden; background: #000; margin-top: 20px; }
         
         #videoElement { display: none; }
         #canvasElement { width: 100%; height: 100%; transform: scaleX(-1); }
 
-        #overlay { position: absolute; top: 10px; left: 10px; background: rgba(0, 0, 0, 0.6); padding: 10px; border-radius: 5px; text-align: left; pointer-events: none; }
+        /* Overlay UI */
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; padding: 10px; display: flex; flex-direction: column; justify-content: space-between; }
         
-        #status-display { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 32px; font-weight: bold; text-shadow: 2px 2px 4px #000; z-index: 20; pointer-events: none; text-align: center; }
-        
-        #progress-container { position: absolute; bottom: 0; left: 0; width: 100%; height: 15px; background: rgba(50, 50, 50, 0.8); }
-        #progress-bar { height: 100%; width: 0%; background: #00ff00; transition: width 0.1s linear; }
+        #status-display { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 48px; font-weight: bold; text-shadow: 2px 2px 4px #000; z-index: 20; text-align: center; width: 100%; }
 
-        #prediction-box { margin-top: 15px; font-size: 18px; padding: 15px; background: #333; border-radius: 8px; width: 90%; max-width: 480px; text-align: center; }
+        #progress-container { position: absolute; bottom: 0; left: 0; width: 100%; height: 20px; background: rgba(50, 50, 50, 0.8); }
+        #progress-bar { height: 100%; width: 0%; transition: width 0.1s linear, background-color 0.2s ease; }
+
+        #prediction-box { margin-top: 20px; font-size: 24px; padding: 20px; background: #333; border-radius: 8px; width: 90%; max-width: 600px; text-align: center; }
         .highlight { color: #0f0; font-weight: bold; }
         
-        /* Button Style */
-        #controls { margin-top: 10px; }
-        button { padding: 8px 16px; background: #555; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
-        button:hover { background: #777; }
-        button.active { background: #007bff; }
+        .stats { background: rgba(0,0,0,0.6); padding: 5px; border-radius: 4px; display: inline-block; font-size: 14px; }
 
-        #backend-info { position: fixed; bottom: 5px; right: 5px; font-size: 12px; color: #888; }
+        /* Button Styling */
+        .controls { margin-top: 15px; display: flex; gap: 10px; }
+        button { padding: 10px 20px; font-size: 16px; cursor: pointer; background: #444; color: white; border: 1px solid #666; border-radius: 5px; }
+        button:hover { background: #666; }
     </style>
 </head>
 <body>
-
-    <h3>FSL AI (WASM + SIMD)</h3>
 
     <div id="container">
         <video id="videoElement" playsinline></video>
         <canvas id="canvasElement"></canvas>
         
-        <div id="overlay">
-            <div>FPS: <span id="fps" class="highlight">0</span></div>
-            <div>Conf: <span id="conf">0.00</span></div>
-            <div>Sign: <span id="curr" class="highlight">-</span></div>
+        <div id="ui-layer">
+            <div style="pointer-events: auto;">
+                <div class="stats">FPS: <span id="fps-val">0</span></div>
+                <div class="stats">Conf: <span id="conf">0.00</span></div>
+            </div>
+            <div id="status-display">LOADING...</div>
         </div>
-
-        <div id="status-display">INIT WASM...</div>
 
         <div id="progress-container">
             <div id="progress-bar"></div>
         </div>
     </div>
 
-    <div id="controls">
-        <button id="toggle-landmarks">Show Debug View</button>
-    </div>
+    <div id="prediction-box">Sentence: <span id="sentence" class="highlight">Waiting...</span></div>
 
-    <div id="prediction-box">Sentence: <span id="sentence">Waiting...</span></div>
-    <div id="backend-info">Backend: Initializing...</div>
+    <div class="controls">
+        <button onclick="toggleSwap()">Swap L/R</button>
+        <button onclick="toggleVisuals()">Toggle Visuals</button> </div>
 
     <script>
-        const videoElement = document.getElementById('videoElement');
-        const canvasElement = document.getElementById('canvasElement');
-        const canvasCtx = canvasElement.getContext('2d');
-        const progressBar = document.getElementById('progress-bar');
-        const statusDisplay = document.getElementById('status-display');
-        const currSpan = document.getElementById('curr');
-        const confSpan = document.getElementById('conf');
-        const sentSpan = document.getElementById('sentence');
-        const backendInfo = document.getElementById('backend-info');
-        
-        // NEW FPS REFERENCE
-        const fpsSpan = document.getElementById('fps');
-        
-        const toggleBtn = document.getElementById('toggle-landmarks');
+        // --- CONFIGURATION ---
+        const CONFIG = {
+            SEQUENCE_LENGTH: 60,
+            WIDTH: 320,  
+            HEIGHT: 240,
+            THRESHOLD: 0.8
+        };
 
-        let model;
-        let labels = [];
-        let sequence = [];
-        let sentence = [];
-        
-        let showLandmarks = false;
-
-        // FPS Variables
-        let lastFpsTime = Date.now();
-        let fpsFrameCount = 0;
-
-        const SEQUENCE_LENGTH = 60; 
-        const THRESHOLD = 0.8;
-
+        // --- STATE MACHINE CONSTANTS ---
         const STATE_PREP = 0;
         const STATE_RECORD = 1;
         const STATE_RESULT = 2;
+
+        // DOM Elements
+        const video = document.getElementById('videoElement');
+        const canvas = document.getElementById('canvasElement');
+        const ctx = canvas.getContext('2d');
+        const progressBar = document.getElementById('progress-bar');
+        const statusDisplay = document.getElementById('status-display');
+        const confSpan = document.getElementById('conf');
+        const sentSpan = document.getElementById('sentence');
+        const fpsVal = document.getElementById('fps-val');
+
+        // Logic Variables
+        let model, hands;
+        let labels = [];
+        let sequence = [];
+        let sentence = [];
         let currentState = STATE_PREP;
         let phaseStartTime = 0;
+        
+        // Performance Variables
+        let lastFrameTime = 0;
+        let isProcessing = false;
+        let isCameraReady = false;
+        let isSwapMode = false;
+        let showLandmarks = true; // NEW STATE VARIABLE
 
-        toggleBtn.addEventListener('click', () => {
-            showLandmarks = !showLandmarks;
-            if(showLandmarks) {
-                toggleBtn.innerText = "Hide Debug View";
-                toggleBtn.classList.add('active');
-            } else {
-                toggleBtn.innerText = "Show Debug View";
-                toggleBtn.classList.remove('active');
-            }
-        });
-
-        // --- 1. SETUP WASM BACKEND & LOAD MODEL ---
-        async function loadAssets() {
-            statusDisplay.innerText = "LOADING WASM...";
+        // --- 1. INITIALIZATION ---
+        async function init() {
+            startLoop(); 
             
+            try { tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/'); } catch(e){}
+            await tf.setBackend('wasm');
+            
+            loadModel();
+        }
+
+        async function loadModel() {
+            statusDisplay.innerText = "LOADING AI...";
             try {
-                tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/');
-                await tf.setBackend('wasm');
-                await tf.ready(); 
-
-                const currentBackend = tf.getBackend();
-                console.log("Current TF Backend:", currentBackend);
-                backendInfo.innerText = `Backend: ${currentBackend.toUpperCase()}`;
-
-                statusDisplay.innerText = "LOADING MODEL...";
-                
                 model = await tf.loadLayersModel('model/model.json');
+                tf.tidy(() => model.predict(tf.zeros([1, 60, 126]))); // Warmup
                 
-                const zeroTensor = tf.zeros([1, 60, 126]);
-                model.predict(zeroTensor).dispose();
-                zeroTensor.dispose();
-
                 const response = await fetch('js/labels.json');
                 labels = await response.json();
                 
-                statusDisplay.innerText = "STARTING CAM...";
-                startCamera();
-
+                setupMediaPipe();
             } catch (err) {
-                console.error("Setup Error:", err);
-                statusDisplay.innerText = "ERROR";
-                backendInfo.innerText = "Error: " + err.message;
+                statusDisplay.innerText = "MODEL ERROR";
+                console.error(err);
             }
         }
 
-        // --- 2. KEYPOINT EXTRACTION (Holistic) ---
-        function extractKeypoints(results) {
-            const getHand = (landmarks) => {
-                if (landmarks) {
-                    let flat = [];
-                    for (const lm of landmarks) flat.push(lm.x, lm.y, lm.z);
-                    return flat;
-                } else {
-                    return new Array(21 * 3).fill(0);
+        function setupMediaPipe() {
+            hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 0, 
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            hands.onResults(onResults);
+            startCamera();
+        }
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: CONFIG.WIDTH }, height: { ideal: CONFIG.HEIGHT }, facingMode: "user" }
+                });
+                video.srcObject = stream;
+                video.onloadedmetadata = () => {
+                    video.play();
+                    canvas.width = CONFIG.WIDTH;
+                    canvas.height = CONFIG.HEIGHT;
+                    isCameraReady = true;
+                    phaseStartTime = Date.now(); 
+                };
+            } catch (e) { statusDisplay.innerText = "CAM ERROR"; }
+        }
+
+        // --- 2. FAST DRAW LOOP ---
+        function startLoop() {
+            function step() {
+                if (isCameraReady) {
+                    // Note: We don't draw here anymore, onResults handles it all to sync visual/logic
+                    if (!isProcessing) {
+                        isProcessing = true;
+                        hands.send({image: video}).then(() => { isProcessing = false; });
+                    }
                 }
-            };
-            const lh = getHand(results.leftHandLandmarks);
-            const rh = getHand(results.rightHandLandmarks);
-            return [...lh, ...rh];
+                requestAnimationFrame(step);
+            }
+            step();
         }
 
-        // --- 3. MEDIAPIPE LOOP ---
+        // --- 3. LOGIC LOOP ---
         function onResults(results) {
-            const now = Date.now();
+            // FPS Calculation
+            const now = performance.now();
+            fpsVal.innerText = Math.round(1000 / (now - lastFrameTime));
+            lastFrameTime = now;
 
-            // --- FPS CALCULATION ---
-            fpsFrameCount++;
-            if (now - lastFpsTime >= 1000) {
-                // Update FPS text every 1 second
-                fpsSpan.innerText = fpsFrameCount;
-                fpsFrameCount = 0;
-                lastFpsTime = now;
+            // Draw Video Frame (ALWAYS DO THIS)
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+            // Draw Skeleton (ONLY IF ENABLED)
+            if (showLandmarks && results.multiHandLandmarks) {
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(ctx, landmarks, HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 1});
+                    drawLandmarks(ctx, landmarks, {color: '#00FF00', lineWidth: 1, radius: 2});
+                }
             }
+            ctx.restore();
 
-            canvasElement.width = videoElement.videoWidth;
-            canvasElement.height = videoElement.videoHeight;
-            canvasCtx.save();
-            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
-            
-            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
-            
-            if (showLandmarks) {
-                drawConnectors(canvasCtx, results.leftHandLandmarks, HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 3});
-                drawLandmarks(canvasCtx, results.leftHandLandmarks, {color: '#00FF00', lineWidth: 1});
-                drawConnectors(canvasCtx, results.rightHandLandmarks, HAND_CONNECTIONS, {color: '#00CC00', lineWidth: 3});
-                drawLandmarks(canvasCtx, results.rightHandLandmarks, {color: '#FF0000', lineWidth: 1});
-            }
-
-            canvasCtx.restore();
-
-            if (phaseStartTime === 0) phaseStartTime = now;
-            const elapsed = now - phaseStartTime;
+            // --- STATE MACHINE LOGIC ---
+            // (Note: This logic runs regardless of showLandmarks!)
+            const timeNow = Date.now();
+            const elapsed = timeNow - phaseStartTime;
 
             if (currentState === STATE_PREP) {
                 const progress = Math.min(elapsed / 2000, 1.0) * 100;
                 progressBar.style.width = progress + "%";
                 progressBar.style.backgroundColor = "yellow";
+                
                 statusDisplay.innerText = "GET READY";
                 statusDisplay.style.color = "yellow";
-                if (elapsed >= 2000) { currentState = STATE_RECORD; phaseStartTime = Date.now(); sequence = []; }
+
+                if (elapsed >= 2000) {
+                    currentState = STATE_RECORD;
+                    phaseStartTime = Date.now();
+                    sequence = []; 
+                }
 
             } else if (currentState === STATE_RECORD) {
                 const progress = Math.min(elapsed / 2000, 1.0) * 100;
                 progressBar.style.width = progress + "%";
                 progressBar.style.backgroundColor = "red";
+                
                 statusDisplay.innerText = "RECORDING";
                 statusDisplay.style.color = "red";
 
+                // COLLECT DATA (Still works even if landmarks invisible!)
                 const keypoints = extractKeypoints(results);
                 sequence.push(keypoints);
 
-                if (elapsed >= 2000) { currentState = STATE_RESULT; phaseStartTime = Date.now(); runPrediction(); }
+                if (elapsed >= 2000) {
+                    currentState = STATE_RESULT;
+                    phaseStartTime = Date.now();
+                    runPrediction(); 
+                }
 
             } else if (currentState === STATE_RESULT) {
                 const progress = Math.min(elapsed / 2000, 1.0) * 100;
                 progressBar.style.width = (100 - progress) + "%";
                 progressBar.style.backgroundColor = "#00ff00";
                 statusDisplay.style.color = "#00ff00";
-                if (elapsed >= 2000) { currentState = STATE_PREP; phaseStartTime = Date.now(); }
+
+                if (elapsed >= 2000) {
+                    currentState = STATE_PREP;
+                    phaseStartTime = Date.now();
+                }
             }
         }
 
         // --- 4. PREDICTION LOGIC ---
         async function runPrediction() {
-            if (sequence.length < 5) return; 
-            
+            if (sequence.length < 5) {
+                statusDisplay.innerText = "NO DATA";
+                return;
+            }
+
             let finalSeq = [];
-            if (sequence.length >= SEQUENCE_LENGTH) {
-                finalSeq = sequence.slice(sequence.length - SEQUENCE_LENGTH);
+            if (sequence.length >= CONFIG.SEQUENCE_LENGTH) {
+                finalSeq = sequence.slice(sequence.length - CONFIG.SEQUENCE_LENGTH);
             } else {
-                const paddingCount = SEQUENCE_LENGTH - sequence.length;
+                const paddingCount = CONFIG.SEQUENCE_LENGTH - sequence.length;
                 const zeroFrame = new Array(126).fill(0);
                 for(let i=0; i<paddingCount; i++) finalSeq.push(zeroFrame);
                 finalSeq = finalSeq.concat(sequence);
             }
 
             tf.tidy(() => {
-                const inputTensor = tf.tensor3d([finalSeq]);
-                const prediction = model.predict(inputTensor);
-                const values = prediction.dataSync(); 
-                
+                const input = tf.tensor3d([finalSeq]);
+                const pred = model.predict(input);
+                const values = pred.dataSync();
                 const maxVal = Math.max(...values);
-                const maxIndex = values.indexOf(maxVal);
-                const predictedSign = labels[maxIndex];
-
+                const idx = values.indexOf(maxVal);
+                
+                const predictedSign = labels[idx];
                 confSpan.innerText = maxVal.toFixed(2);
 
-                if (maxVal > THRESHOLD) {
-                    currSpan.innerText = predictedSign;
+                if (maxVal > CONFIG.THRESHOLD) {
                     statusDisplay.innerText = predictedSign;
                     if (sentence.length === 0 || predictedSign !== sentence[sentence.length - 1]) {
                         sentence.push(predictedSign);
@@ -258,41 +277,35 @@
                         sentSpan.innerText = sentence.join(" ");
                     }
                 } else {
-                    currSpan.innerText = "...";
                     statusDisplay.innerText = "LOW CONFIDENCE";
                 }
             });
         }
 
-        // --- 5. INITIALIZE MEDIAPIPE ---
-        const holistic = new Holistic({locateFile: (file) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`;
-        }});
-        
-        holistic.setOptions({
-            modelComplexity: 0, 
-            smoothLandmarks: true,
-            enableSegmentation: false,
-            enableFaceMesh: false,
-            refineFaceLandmarks: false,
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
-        });
-        
-        holistic.onResults(onResults);
-
-        function startCamera() {
-            const camera = new Camera(videoElement, {
-                onFrame: async () => {
-                    await holistic.send({image: videoElement});
-                },
-                width: 320,
-                height: 240
-            });
-            camera.start();
+        // --- 5. KEYPOINT EXTRACTION ---
+        function extractKeypoints(results) {
+            let lh = new Array(63).fill(0);
+            let rh = new Array(63).fill(0);
+            
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    let label = results.multiHandedness[i].label;
+                    if (isSwapMode) label = (label === "Left") ? "Right" : "Left";
+                    
+                    const lm = results.multiHandLandmarks[i];
+                    const flat = [];
+                    for (const p of lm) flat.push(p.x, p.y, p.z);
+                    
+                    if (label === "Left") lh = flat; else rh = flat;
+                }
+            }
+            return [...lh, ...rh];
         }
 
-        loadAssets();
+        function toggleSwap() { isSwapMode = !isSwapMode; }
+        function toggleVisuals() { showLandmarks = !showLandmarks; } // NEW FUNCTION
+
+        init();
     </script>
 </body>
 </html>
