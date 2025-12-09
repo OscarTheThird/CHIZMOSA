@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>FSL Progress Bar — Mode C (Max Accuracy)</title>
+<title>FSL Progress Bar — Mode A (Max Smoothness)</title>
 
 <!-- TF.js -->
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
@@ -62,10 +62,10 @@ const CONFIG = {
   THRESHOLD: 0.8,
   WIDTH: 640,
   HEIGHT: 350,
-  PROCESS_WIDTH: 320,    // keep slightly larger for accuracy
-  PROCESS_HEIGHT: 240,
-  TARGET_MS: 50,         // ~20 FPS processing (50 ms)
-  MAX_NUM_HANDS: 2
+  PROCESS_WIDTH: 256,    // smaller for smoothness
+  PROCESS_HEIGHT: 224,
+  TARGET_MS: 83,         // ~12 FPS processing (83 ms)
+  MAX_NUM_HANDS: 1
 };
 
 const video = document.getElementById('videoElement');
@@ -102,7 +102,7 @@ smallCanvas.height = CONFIG.PROCESS_HEIGHT;
 const smallCtx = smallCanvas.getContext('2d');
 
 async function init(){
-  await setBackend('webgl'); // default to WebGL for speed
+  await setBackend('webgl'); // default to WebGL
   await loadModel();
 }
 
@@ -140,12 +140,12 @@ async function loadModel(){
 
 function setupMediaPipe(){
   hands = new Hands({ locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
-  // Mode C: higher accuracy modelComplexity = 1
+  // Mode A: smoothness, less complexity, smaller input
   hands.setOptions({
     maxNumHands: CONFIG.MAX_NUM_HANDS,
-    modelComplexity: 1,
-    minDetectionConfidence: 0.45,
-    minTrackingConfidence: 0.45
+    modelComplexity: 0,
+    minDetectionConfidence: 0.35,
+    minTrackingConfidence: 0.35
   });
   hands.onResults(onResults);
   startCamera();
@@ -173,7 +173,7 @@ async function startCamera(){
 }
 
 function loop(now){
-  // render UI (video) every frame for smooth visuals
+  // render UI (video) every frame
   ctx.drawImage(video, 0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
 
   // fps smoothing
@@ -185,13 +185,12 @@ function loop(now){
     fpsVal.innerText = Math.round(lastFPS);
   }
 
-  // time-based throttle for MediaPipe (prevents queueing)
+  // time-based throttle for MediaPipe
   if (!isProcessing && (now - lastProcess) >= CONFIG.TARGET_MS){
     lastProcess = now;
     isProcessing = true;
     smallCtx.drawImage(video, 0, 0, CONFIG.PROCESS_WIDTH, CONFIG.PROCESS_HEIGHT);
     hands.send({ image: smallCanvas }).then(()=> {
-      // mediaPipe result handler will run onResults; we clear isProcessing here as well to be safe
       isProcessing = false;
     }).catch((err)=> {
       console.error('hands.send error:', err);
@@ -203,8 +202,7 @@ function loop(now){
 }
 
 function onResults(results){
-  // do not redraw results.image; video is already on canvas
-  // draw landmarks/connectors on top (only when available)
+  // only draw landmarks when results exist
   if (showSkeleton && results.multiHandLandmarks) {
     for (const landmarks of results.multiHandLandmarks) {
       drawConnectors(ctx, landmarks, HAND_CONNECTIONS, { color:'#00FF00', lineWidth:1 });
@@ -212,44 +210,22 @@ function onResults(results){
     }
   }
 
-  // update UI and phases (same logic as your original code)
+  // update UI/phase
   const now = Date.now();
   const timeInPhase = now - phaseStartTime;
-  let progress = 0;
-  let barColor = '#333';
-
+  let progress = 0; let barColor = '#333';
   if (currentPhase === 'READY') {
     progress = Math.min(100, (timeInPhase / PHASE_DURATIONS.READY) * 100);
-    barColor = '#FFD700';
-    updateUI('READY','GET READY','phase-ready');
-    phaseVal.innerText = 'READY';
-    if (timeInPhase > PHASE_DURATIONS.READY) {
-      currentPhase = 'RECORDING';
-      phaseStartTime = now;
-      sequence = [];
-    }
-  }
-  else if (currentPhase === 'RECORDING') {
+    barColor = '#FFD700'; updateUI('READY','GET READY','phase-ready'); phaseVal.innerText = 'READY';
+    if (timeInPhase > PHASE_DURATIONS.READY) { currentPhase = 'RECORDING'; phaseStartTime = now; sequence = []; }
+  } else if (currentPhase === 'RECORDING') {
     progress = Math.min(100, (timeInPhase / PHASE_DURATIONS.RECORDING) * 100);
-    barColor = '#FF0000';
-    updateUI('REC','RECORDING...','phase-rec');
-    phaseVal.innerText = 'REC';
-    // collect keypoints exactly as before
-    const keypoints = extractKeypoints(results);
-    sequence.push(keypoints);
-    if (timeInPhase > PHASE_DURATIONS.RECORDING) {
-      performPrediction();
-      currentPhase = 'RESULT';
-      phaseStartTime = now;
-    }
-  }
-  else if (currentPhase === 'RESULT') {
-    progress = 100; barColor = '#00FF00';
-    updateUI('RESULT', lastPredictionText, 'phase-result');
-    phaseVal.innerText = 'RESULT';
-    if (timeInPhase > PHASE_DURATIONS.RESULT) {
-      currentPhase = 'READY'; phaseStartTime = now; statusMsg.innerText = ''; lastPredictionText = '';
-    }
+    barColor = '#FF0000'; updateUI('REC','RECORDING...','phase-rec'); phaseVal.innerText = 'REC';
+    const keypoints = extractKeypoints(results); sequence.push(keypoints);
+    if (timeInPhase > PHASE_DURATIONS.RECORDING) { performPrediction(); currentPhase = 'RESULT'; phaseStartTime = now; }
+  } else if (currentPhase === 'RESULT') {
+    progress = 100; barColor = '#00FF00'; updateUI('RESULT', lastPredictionText, 'phase-result'); phaseVal.innerText = 'RESULT';
+    if (timeInPhase > PHASE_DURATIONS.RESULT) { currentPhase = 'READY'; phaseStartTime = now; statusMsg.innerText = ''; lastPredictionText = ''; }
   }
 
   progressBar.style.width = progress + '%';
@@ -283,7 +259,6 @@ async function performPrediction(){
 function updateUI(phase, text, cssClass){ statusMsg.className = cssClass; statusMsg.innerText = text; }
 function addToSentence(word){ sentence.push(word); if (sentence.length>8) sentence.shift(); sentSpan.innerText = sentence.join(' '); }
 
-// EXACT same extraction (kept unchanged)
 function extractKeypoints(results) {
   let lh = new Array(63).fill(0);
   let rh = new Array(63).fill(0);
