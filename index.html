@@ -8,7 +8,7 @@
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/tf-backend-wasm.js"></script>
     
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/holistic/holistic.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
 
     <style>
@@ -94,251 +94,325 @@
     </div>
 
     <script>
-        const CONFIG = {
-            SEQUENCE_LENGTH: 60,
-            THRESHOLD: 0.8,
-            WIDTH: 320, 
-            HEIGHT: 240
+    // --- 1. CONFIGURATION ---
+    const CONFIG = {
+        SEQUENCE_LENGTH: 60,
+        THRESHOLD: 0.7,
+        WIDTH: 640,  // Match your Python resolution if possible
+        HEIGHT: 480
+    };
+
+    // Exactly matching your Python "CUSTOM_FACE_INDICES"
+    // We sort it to ensure the order is identical to Python's sorted(list(set(...)))
+    const RAW_FACE_INDICES = [
+        61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291,
+        146, 91, 181, 84, 17, 314, 405, 321, 375,
+        6, 4,
+        56, 70, 63, 105, 66, 107, 336, 296, 334, 293, 300,
+        33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7,
+        362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382,
+        151, 9, 8, 175, 199, 58, 132, 93, 234, 127, 162, 356, 454, 323, 361, 288, 389
+    ];
+    const FACE_INDICES = [...new Set(RAW_FACE_INDICES)].sort((a, b) => a - b);
+
+    // DOM Elements
+    const video = document.getElementById('videoElement');
+    const canvas = document.getElementById('canvasElement');
+    const ctx = canvas.getContext('2d');
+    const statusMsg = document.getElementById('status-msg');
+    const fpsVal = document.getElementById('fps-val');
+    const phaseVal = document.getElementById('phase-val');
+    const confVal = document.getElementById('conf-val');
+    const sentSpan = document.getElementById('sentence');
+    const progressBar = document.getElementById('progress-bar');
+
+    // State Variables
+    let model, holistic;
+    let labels = [];
+    let sequence = [];
+    let sentence = [];
+    let isProcessing = false;
+    let isSwapMode = false;
+    let showSkeleton = true;
+
+    // Phase Logic
+    let currentPhase = 'LOADING';
+    let phaseStartTime = 0;
+    let lastFrameTime = 0;
+    const PHASE_DURATIONS = { READY: 2000, RECORDING: 2000, RESULT: 2000 };
+    let lastPredictionText = "";
+
+    async function init() {
+        try { tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/'); } catch(e){}
+        await setBackend('wasm');
+        loadModel();
+    }
+
+    async function setBackend(type) {
+        statusMsg.innerText = "SWITCHING ENGINE...";
+        try {
+            await tf.setBackend(type);
+            document.getElementById('btn-wasm').className = type === 'wasm' ? 'active' : '';
+            document.getElementById('btn-webgl').className = type === 'webgl' ? 'active' : '';
+        } catch (err) { console.error(err); }
+    }
+
+    async function loadModel() {
+        statusMsg.innerText = "LOADING MODEL...";
+        try {
+            model = await tf.loadLayersModel('model/model.json');
+            
+            // CORRECT WARMUP: Shape [1, 60, 336]
+            tf.tidy(() => model.predict(tf.zeros([1, CONFIG.SEQUENCE_LENGTH, 372])));
+            
+            const lblRes = await fetch('js/labels.json');
+            labels = await lblRes.json();
+            
+            setupHolistic(); // Switch to Holistic
+        } catch (e) { 
+            statusMsg.innerText = "LOAD ERROR"; 
+            console.error(e); 
+        }
+    }
+
+    function setupHolistic() {
+        // Initialize Holistic instead of Hands
+        holistic = new Holistic({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`});
+        holistic.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        holistic.onResults(onResults);
+        startCamera();
+    }
+
+    async function startCamera() {
+        const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: CONFIG.WIDTH, height: CONFIG.HEIGHT, facingMode: "user" }
+        });
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+            video.play();
+            canvas.width = CONFIG.WIDTH;
+            canvas.height = CONFIG.HEIGHT;
+            currentPhase = 'READY';
+            phaseStartTime = Date.now();
+            loop();
         };
+    }
 
-        const video = document.getElementById('videoElement');
-        const canvas = document.getElementById('canvasElement');
-        const ctx = canvas.getContext('2d');
-        const statusMsg = document.getElementById('status-msg');
-        const fpsVal = document.getElementById('fps-val');
-        const phaseVal = document.getElementById('phase-val');
-        const confVal = document.getElementById('conf-val');
-        const sentSpan = document.getElementById('sentence');
-        const progressBar = document.getElementById('progress-bar');
-
-        let model, hands;
-        let labels = [];
-        let sequence = [];
-        let sentence = [];
-        let isProcessing = false;
-        let isSwapMode = false; 
-        let showSkeleton = true;
-
-        let currentPhase = 'LOADING'; 
-        let phaseStartTime = 0;
-        let lastFrameTime = 0;
-        
-        const PHASE_DURATIONS = {
-            READY: 2000,     
-            RECORDING: 2000, 
-            RESULT: 2000      
-        };
-        let lastPredictionText = "";
-
-        async function init() {
-            try { tf.wasm.setWasmPaths('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-wasm@latest/dist/'); } catch(e){}
-            await setBackend('wasm');
-            loadModel();
-        }
-
-        async function setBackend(type) {
-            statusMsg.innerText = "SWITCHING ENGINE...";
-            try {
-                await tf.setBackend(type);
-                document.getElementById('btn-wasm').className = type === 'wasm' ? 'active' : '';
-                document.getElementById('btn-webgl').className = type === 'webgl' ? 'active' : '';
-            } catch (err) { alert(err.message); }
-        }
-
-        async function loadModel() {
-            statusMsg.innerText = "LOADING MODEL...";
-            try {
-                model = await tf.loadLayersModel('model/model.json');
-                tf.tidy(() => model.predict(tf.zeros([1, 60, 126]))); 
-                const lblRes = await fetch('js/labels.json');
-                labels = await lblRes.json();
-                setupMediaPipe();
-            } catch (e) { statusMsg.innerText = "LOAD ERROR"; console.error(e); }
-        }
-
-        function setupMediaPipe() {
-            hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
-            hands.setOptions({ maxNumHands: 2, modelComplexity: 0, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
-            hands.onResults(onResults);
-            startCamera();
-        }
-
-        async function startCamera() {
-            const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: CONFIG.WIDTH, height: CONFIG.HEIGHT, facingMode: "user" }
-            });
-            video.srcObject = stream;
-            video.onloadedmetadata = () => {
-                video.play();
-                canvas.width = CONFIG.WIDTH;
-                canvas.height = CONFIG.HEIGHT;
-                
-                currentPhase = 'READY';
-                phaseStartTime = Date.now();
-                loop();
-            };
-        }
-
-        function loop() {
-            ctx.drawImage(video, 0, 0, CONFIG.WIDTH, CONFIG.HEIGHT);
+    function loop() {
+        if (!video.paused && !video.ended) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
             if (!isProcessing) {
                 isProcessing = true;
-                hands.send({image: canvas}).then(() => { isProcessing = false; });
+                holistic.send({image: canvas}).then(() => { isProcessing = false; });
             }
-            requestAnimationFrame(loop);
         }
+        requestAnimationFrame(loop);
+    }
 
-        function onResults(results) {
-            const now = Date.now();
-            const deltaFPS = now - lastFrameTime;
-            lastFrameTime = now;
-            fpsVal.innerText = Math.round(1000 / deltaFPS);
+    function onResults(results) {
+        // 1. FPS Calculation
+        const now = Date.now();
+        const deltaFPS = now - lastFrameTime;
+        lastFrameTime = now;
+        fpsVal.innerText = Math.round(1000 / deltaFPS);
 
-            if (showSkeleton) {
-                ctx.save();
-                ctx.clearRect(0, 0, canvas.width, canvas.height);
-                ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
-                if (results.multiHandLandmarks) {
-                    for (const landmarks of results.multiHandLandmarks) {
-                        drawConnectors(ctx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 1});
-                        drawLandmarks(ctx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 2});
+        // 2. Drawing Logic
+        if (showSkeleton) {
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw the video frame first
+            ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+            
+            // --- DRAW CUSTOM FACE LANDMARKS ---
+            if (results.faceLandmarks) {
+                ctx.fillStyle = '#00FFFF'; // Cyan color for face dots
+                
+                // Loop through ONLY your custom indices
+                for (const index of FACE_INDICES) {
+                    const lm = results.faceLandmarks[index];
+                    if (lm) {
+                        // Convert normalized (0-1) coordinates to pixel coordinates
+                        const x = lm.x * canvas.width;
+                        const y = lm.y * canvas.height;
+                        
+                        // Draw a small circle
+                        ctx.beginPath();
+                        ctx.arc(x, y, 1.5, 0, 2 * Math.PI); // Radius 1.5
+                        ctx.fill();
                     }
                 }
-                ctx.restore();
             }
 
-            // --- PHASE & PROGRESS LOGIC ---
-            const timeInPhase = now - phaseStartTime;
+            // --- DRAW HANDS (Standard) ---
+            // Left Hand
+            drawConnectors(ctx, results.leftHandLandmarks, HAND_CONNECTIONS, {color: '#CC0000', lineWidth: 2});
+            drawLandmarks(ctx, results.leftHandLandmarks, {color: '#FF0000', lineWidth: 1, radius: 2});
+
+            // Right Hand
+            drawConnectors(ctx, results.rightHandLandmarks, HAND_CONNECTIONS, {color: '#00CC00', lineWidth: 2});
+            drawLandmarks(ctx, results.rightHandLandmarks, {color: '#00FF00', lineWidth: 1, radius: 2});
             
-            // Calculate Progress Percentage (0% to 100%)
-            let progress = 0;
-            let barColor = "#333";
-
-            if (currentPhase === 'READY') {
-                // Fill up yellow
-                progress = Math.min(100, (timeInPhase / PHASE_DURATIONS.READY) * 100);
-                barColor = "#FFD700"; // Gold
-                
-                updateUI("READY", "GET READY", "phase-ready");
-                phaseVal.innerText = "READY";
-                
-                if (timeInPhase > PHASE_DURATIONS.READY) {
-                    currentPhase = 'RECORDING';
-                    phaseStartTime = now;
-                    sequence = []; 
-                }
-            }
-            
-            else if (currentPhase === 'RECORDING') {
-                // Fill up red
-                progress = Math.min(100, (timeInPhase / PHASE_DURATIONS.RECORDING) * 100);
-                barColor = "#FF0000"; // Red
-                
-                updateUI("REC", "RECORDING...", "phase-rec");
-                phaseVal.innerText = "REC";
-
-                const keypoints = extractKeypoints(results);
-                sequence.push(keypoints);
-
-                if (timeInPhase > PHASE_DURATIONS.RECORDING) {
-                    performPrediction();
-                    currentPhase = 'RESULT';
-                    phaseStartTime = now;
-                }
-            }
-
-            else if (currentPhase === 'RESULT') {
-                // Stay full green
-                progress = 100;
-                barColor = "#00FF00"; // Green
-                
-                updateUI("RESULT", lastPredictionText, "phase-result");
-                phaseVal.innerText = "RESULT";
-
-                if (timeInPhase > PHASE_DURATIONS.RESULT) {
-                    currentPhase = 'READY';
-                    phaseStartTime = now;
-                    statusMsg.innerText = "";
-                    lastPredictionText = "";
-                }
-            }
-
-            // Update Progress Bar DOM
-            progressBar.style.width = progress + "%";
-            progressBar.style.backgroundColor = barColor;
+            ctx.restore();
         }
 
-        async function performPrediction() {
-            if (sequence.length === 0) {
-                lastPredictionText = "No Data";
-                return;
+        // ... (Keep your Phase & Progress Bar logic below exactly as it was) ...
+        const timeInPhase = now - phaseStartTime;
+        // ...
+        // (Don't forget to include the rest of the function provided in the previous answer)
+        // ...
+        
+        // --- COPYING PHASE LOGIC FOR COMPLETENESS ---
+        let progress = 0;
+        let barColor = "#333";
+
+        if (currentPhase === 'READY') {
+            progress = Math.min(100, (timeInPhase / PHASE_DURATIONS.READY) * 100);
+            barColor = "#FFD700";
+            updateUI("READY", "GET READY", "phase-ready");
+            if (timeInPhase > PHASE_DURATIONS.READY) {
+                currentPhase = 'RECORDING';
+                phaseStartTime = now;
+                sequence = [];
             }
+        } else if (currentPhase === 'RECORDING') {
+            progress = Math.min(100, (timeInPhase / PHASE_DURATIONS.RECORDING) * 100);
+            barColor = "#FF0000";
+            updateUI("REC", "RECORDING...", "phase-rec");
 
-            let inputData = [...sequence];
-            while (inputData.length < CONFIG.SEQUENCE_LENGTH) {
-                inputData.push(inputData[inputData.length - 1]);
+            const keypoints = extractKeypoints(results);
+            sequence.push(keypoints);
+
+            if (timeInPhase > PHASE_DURATIONS.RECORDING) {
+                performPrediction();
+                currentPhase = 'RESULT';
+                phaseStartTime = now;
             }
-            if (inputData.length > CONFIG.SEQUENCE_LENGTH) {
-                inputData = inputData.slice(inputData.length - CONFIG.SEQUENCE_LENGTH);
+        } else if (currentPhase === 'RESULT') {
+            progress = 100;
+            barColor = "#00FF00";
+            updateUI("RESULT", lastPredictionText, "phase-result");
+            if (timeInPhase > PHASE_DURATIONS.RESULT) {
+                currentPhase = 'READY';
+                phaseStartTime = now;
+                lastPredictionText = "";
             }
-
-            tf.tidy(() => {
-                const input = tf.tensor3d([inputData]);
-                const pred = model.predict(input);
-                const values = pred.dataSync();
-                const maxVal = Math.max(...values);
-                const idx = values.indexOf(maxVal);
-
-                confVal.innerText = maxVal.toFixed(2);
-
-                if (maxVal > CONFIG.THRESHOLD) {
-                    const word = labels[idx];
-                    lastPredictionText = word.toUpperCase();
-                    addToSentence(word);
-                } else {
-                    lastPredictionText = "UNCERTAIN";
-                }
-            });
         }
 
-        function updateUI(phase, text, cssClass) {
-            statusMsg.className = cssClass;
-            statusMsg.innerText = text;
-        }
+        progressBar.style.width = progress + "%";
+        progressBar.style.backgroundColor = barColor;
+    }
 
-        function addToSentence(word) {
-            sentence.push(word);
-            if (sentence.length > 8) sentence.shift();
-            sentSpan.innerText = sentence.join(" ");
-        }
-
-        function extractKeypoints(results) {
-            let lh = new Array(63).fill(0);
-            let rh = new Array(63).fill(0);
-            if (results.multiHandLandmarks && results.multiHandedness) {
-                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
-                    let label = results.multiHandedness[i].label;
-                    if (isSwapMode) label = (label === "Left") ? "Right" : "Left";
-                    const lm = results.multiHandLandmarks[i];
-                    const flat = [];
-                    for (const p of lm) flat.push(p.x, p.y, p.z);
-                    if (label === "Left") lh = flat;
-                    else rh = flat;
-                }
+    // --- CRITICAL: MATCH PYTHON EXTRACTION LOGIC ---
+    function extractKeypoints(results) {
+        // 1. Extract Face (Filtered)
+        // Python: face = np.array([[x,y,z] for i in CUSTOM_FACE_INDICES]).flatten()
+        let face = [];
+        if (results.faceLandmarks) {
+            for (const i of FACE_INDICES) {
+                const lm = results.faceLandmarks[i];
+                face.push(lm.x, lm.y, lm.z);
             }
-            return [...lh, ...rh];
+        } else {
+            // Fill with zeros if no face detected (70 landmarks * 3 coords = 210 zeros)
+            face = new Array(FACE_INDICES.length * 3).fill(0);
         }
 
-        function toggleSwap() {
-            isSwapMode = !isSwapMode;
-            document.getElementById('btn-swap').className = isSwapMode ? 'active' : '';
+        // 2. Extract Left Hand
+        let lh = [];
+        if (results.leftHandLandmarks) {
+            for (const res of results.leftHandLandmarks) {
+                lh.push(res.x, res.y, res.z);
+            }
+        } else {
+            lh = new Array(21 * 3).fill(0);
         }
 
-        function toggleSkeleton() {
-            showSkeleton = !showSkeleton;
+        // 3. Extract Right Hand
+        let rh = [];
+        if (results.rightHandLandmarks) {
+            for (const res of results.rightHandLandmarks) {
+                rh.push(res.x, res.y, res.z);
+            }
+        } else {
+            rh = new Array(21 * 3).fill(0);
         }
 
-        init();
-    </script>
+        // Handle Swapping for Mirrored Video
+        if (isSwapMode) {
+            const temp = lh;
+            lh = rh;
+            rh = temp;
+        }
+
+        // Python Order: concatenate([face, lh, rh])
+        return [...face, ...lh, ...rh];
+    }
+
+    async function performPrediction() {
+        if (sequence.length === 0) return;
+
+        // Pad or Trim sequence to exact length
+        let inputData = [...sequence];
+        // If too short, duplicate last frame
+        while (inputData.length < CONFIG.SEQUENCE_LENGTH) {
+            inputData.push(inputData[inputData.length - 1]);
+        }
+        // If too long, take latest
+        if (inputData.length > CONFIG.SEQUENCE_LENGTH) {
+            inputData = inputData.slice(inputData.length - CONFIG.SEQUENCE_LENGTH);
+        }
+
+        tf.tidy(() => {
+            // Shape: [1, 60, 336]
+            const input = tf.tensor3d([inputData]); 
+            const pred = model.predict(input);
+            const values = pred.dataSync();
+            const maxVal = Math.max(...values);
+            const idx = values.indexOf(maxVal);
+
+            confVal.innerText = maxVal.toFixed(2);
+
+            if (maxVal > CONFIG.THRESHOLD) {
+                const word = labels[idx];
+                lastPredictionText = word.toUpperCase();
+                addToSentence(word);
+            } else {
+                lastPredictionText = "UNCERTAIN";
+            }
+        });
+    }
+
+    function updateUI(phase, text, cssClass) {
+        statusMsg.className = cssClass;
+        statusMsg.innerText = text;
+        phaseVal.innerText = phase;
+    }
+
+    function addToSentence(word) {
+        // Simple logic to avoid duplicate consecutive words
+        if (sentence.length > 0 && sentence[sentence.length - 1] === word) return;
+        
+        sentence.push(word);
+        if (sentence.length > 8) sentence.shift();
+        sentSpan.innerText = sentence.join(" ");
+    }
+
+    function toggleSwap() {
+        isSwapMode = !isSwapMode;
+        document.getElementById('btn-swap').className = isSwapMode ? 'active' : '';
+    }
+
+    function toggleSkeleton() {
+        showSkeleton = !showSkeleton;
+    }
+
+    init();
+</script>
 </body>
 </html>
