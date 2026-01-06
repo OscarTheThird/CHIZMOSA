@@ -103,12 +103,12 @@
     };
 
     // Exactly matching your Python "CUSTOM_FACE_INDICES"
-    // We sort it to ensure the order is identical to Python's sorted(list(set(...)))
+    
     const RAW_FACE_INDICES = [
         61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291,
         146, 91, 181, 84, 17, 314, 405, 321, 375,
         6, 4,
-        56, 70, 63, 105, 66, 107, 336, 296, 334, 293, 300,
+        56, 70, 63, 105, 66, 107, 336, 296, 334, 293, 300,// REMOVE INDEX 56 PAG BAG O NA NGA MODEL
         33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7,
         362, 398, 384, 385, 386, 387, 388, 466, 263, 249, 390, 373, 374, 380, 381, 382,
         151, 9, 8, 175, 199, 58, 132, 93, 234, 127, 162, 356, 454, 323, 361, 288, 389
@@ -179,7 +179,7 @@
         // Initialize Holistic instead of Hands
         holistic = new Holistic({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/holistic/${file}`});
         holistic.setOptions({
-            modelComplexity: 1,
+            modelComplexity: 0,
             smoothLandmarks: true,
             minDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5
@@ -231,22 +231,21 @@
             
             // --- DRAW CUSTOM FACE LANDMARKS ---
             if (results.faceLandmarks) {
-                ctx.fillStyle = '#00FFFF'; // Cyan color for face dots
+                ctx.fillStyle = '#00FFFF'; 
+                ctx.beginPath(); // Start the path ONCE
                 
-                // Loop through ONLY your custom indices
                 for (const index of FACE_INDICES) {
                     const lm = results.faceLandmarks[index];
                     if (lm) {
-                        // Convert normalized (0-1) coordinates to pixel coordinates
                         const x = lm.x * canvas.width;
                         const y = lm.y * canvas.height;
                         
-                        // Draw a small circle
-                        ctx.beginPath();
-                        ctx.arc(x, y, 1.5, 0, 2 * Math.PI); // Radius 1.5
-                        ctx.fill();
+                        // Just add the circle to the path, don't fill yet
+                        ctx.moveTo(x + 1.5, y); 
+                        ctx.arc(x, y, 1.5, 0, 2 * Math.PI); 
                     }
                 }
+                ctx.fill(); // Fill ALL circles at once
             }
 
             // --- DRAW HANDS (Standard) ---
